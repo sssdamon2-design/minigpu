@@ -1,0 +1,50 @@
+# MiniGPU: ignore generated build files; track CMakeLists.txt and source files.
+
+# CMake / Ninja build directories
+/build/
+/build-*/
+/build_*/
+/cmake-build-*/
+/out/
+
+# In-source CMake/Ninja artifacts, if accidentally generated
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/Makefile
+/build.ninja
+/.ninja_deps
+/.ninja_log
+/compile_commands.json
+
+# Compiler and CUDA intermediate files
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.ptx
+*.cubin
+*.fatbin
+*.d
+
+# Manually compiled root-level executables from V1
+/hello
+/vector_add
+/gemm_naive
+/mlp
+/mlp_test
+/mlp_shape_test
+/test
+
+# Editor / OS caches
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp
+*.swo
+
+# Crash dumps
+core
+core.*
