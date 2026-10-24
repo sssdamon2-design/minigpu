@@ -1,150 +1,176 @@
-# MiniGPU：CUDA GPU 算子与轻量执行引擎
+# MiniGPU — 从 CUDA Kernel 到可复现的 GEMM 性能分析
 
-> 项目状态：**V1 基础 CUDA 推理闭环与 CMake 构建已实测通过**；V2–V6 为后续规划。  
-> 当前平台：NVIDIA RTX 2060（Compute Capability 7.5 / `sm_75`）、WSL2 Ubuntu 24.04、CUDA Toolkit 12.8。  
-> 本仓库的 V1 是**手写 CUDA 算子与推理执行流程**，不是训练框架、完整模型推理框架或工业级高性能 GEMM 库。
+MiniGPU 是一个循序渐进的 **C++ / CUDA / AI Systems** 学习型工程：从基础 GPU Kernel 与双层 MLP 前向计算出发，逐步实现 FP32 GEMM（矩阵乘法）的 Shared Memory Tiling、Register Blocking，并使用 **NVIDIA cuBLAS** 作为优化对照，通过 **CUDA Event / CUDA Graph** 记录性能。
 
-## 1. 项目目标
+> **当前状态（V2，2026-10-25）：** V1 的基本 CUDA / MLP 闭环和 V2 的五种 GEMM 统一正确性及 Benchmark 已在 RTX 2060 + WSL2 实机运行。V3–V6 属于后续计划，**未在本版本实现**。
+>
+> 本项目面向学习与性能工程实践，**不是**工业级 GEMM 库、完整 AI 推理引擎或 PyTorch 替代品。
 
-MiniGPU 是一个面向 **GPU Kernel / AI Systems / Inference Runtime / 性能优化** 的渐进式 C++/CUDA 工程。以 CPU Reference 和可复现的正确性测试为基础，逐步形成：
+## 1. 当前完成了什么
 
-- **V1（已完成主要工程验收）**：CUDA 基础、Vector Add、Naive GEMM、ReLU、双层 MLP Forward、CUDA Event Benchmark、多 Shape FP32 正确性验证、CMake 构建。
-- **V2（下一阶段）**：Shared Memory Tiled GEMM、Coalescing、Register Blocking、cuBLAS 基线比较。
-- **V3**：Nsight Systems / Nsight Compute 性能分析、Roofline 思路及证据驱动优化。
-- **V4**：Reduction、Softmax、RMSNorm、基础 Attention 与 Kernel Fusion。
-- **V5**：小型 GPU Runtime：RAII Buffer、内存复用、Stream/Event、执行顺序管理。
-- **V6**：真实 PyTorch 小型 Transformer 的 Profiling、Custom CUDA 集成及端到端验证。
+| 阶段 | 已完成内容 | 状态 |
+|---|---|---|
+| V1 | CUDA 线程索引、Vector Add、Naive GEMM、ReLU、双层 MLP Forward、CPU Reference、CMake 与基础 Benchmark | 已完成基础验收 |
+| V2.1 | 独立 FP32 Naive GEMM 基线 | 已完成 |
+| V2.2–V2.3 | Shared Memory Tiling、访存复用与线程布局分析 | 已完成 |
+| V2.4 | 每线程两个输出（1×2 Register Blocking）、TILE=8/16/32 实验 | 已完成 |
+| V2.5 | 5 组 Shape 的正确性与初步性能对比 | 已完成 |
+| V2.6 | cuBLAS SGEMM 接入、统一 CUDA Event、CUDA Graph Benchmark | 已完成 |
+| V2.7 | 固定随机输入、FP64 累加 CPU Reference、数值误差排查、性能报告 | 测试完成，文档与仓库整理中 |
 
-**原则**：V1 只证明算子链路可正确执行和测量；不宣称 GEMM 性能已优化，也不宣称比 PyTorch/cuBLAS 更快。
+### V2 的五种对比实现
 
-## 2. V1 推理计算图
-
-采用 FP32、Row-Major 数据布局，不含 Bias、训练或反向传播：
-
-```text
-Host（CPU）                               Device（GPU）
-X [BATCH, IN]  ──── H2D ────────────────► d_X
-W1 [IN, HIDDEN] ── H2D ────────────────► d_W1
-W2 [HIDDEN, OUT] ─ H2D ────────────────► d_W2
-                                             │
-                                        GEMM 1: X × W1
-                                             ▼
-                                      d_H [BATCH, HIDDEN]
-                                             │
-                                        ReLU（原地修改）
-                                             │
-                                        GEMM 2: H × W2
-                                             ▼
-                                      d_Y [BATCH, OUT]
-CPU Reference ◄───── D2H ──────────────── GPU Output
-          └── atol/rtol 正确性比较
-```
-
-数学表达式：
-
-\[
-H = \operatorname{ReLU}(XW_1),\qquad Y = HW_2
-\]
-
-Kernel 使用一维线程索引：`idx = blockIdx.x * blockDim.x + threadIdx.x`。Naive GEMM 每线程计算一个 `C[row, col]`，并使用 `if (idx >= M*N) return;` 保护非对齐尺寸。
-
-## 3. 开发与构建环境
-
-| 项目 | 已使用的环境 |
+| 实现 | 主要设计 |
 |---|---|
-| GPU | NVIDIA GeForce RTX 2060 6 GB，`sm_75` |
-| 开发系统 | WSL2 Ubuntu 24.04.x（aarch64 **不是**本项目平台） |
-| CUDA Toolkit | 12.8；NVCC 路径 `/usr/local/cuda-12.8/bin/nvcc` |
-| C++ 编译器 | GCC/G++ 13.3 |
-| 构建工具 | CMake 3.28.x、Ninja 1.11.x |
-| 源码目录 | `~/projects/minigpu` |
+| **Naive** | 每个线程计算一个输出元素；FP32 累加 |
+| **Tiled16** | `16×16` Shared Memory Tile；块内复用输入 |
+| **Register2_16** | TILE=16；每个线程使用两个累加器计算两个列方向输出 |
+| **Register2_32** | TILE=32；相同的 1×2 Register Blocking 思路 |
+| **cuBLAS_SGEMM** | `cublasSgemm()`；作为 NVIDIA 优化库参考 |
 
-需要 Ubuntu 中可执行的 NVCC、CMake 和 Ninja；GPU 通过 WSL2 使用 Windows 侧 NVIDIA 驱动。不要为 WSL2 随意额外安装 Linux NVIDIA 显卡驱动。
+矩阵使用 **Row-major** 存储：`A[M,K] × B[K,N] = C[M,N]`。传统 cuBLAS SGEMM 采用 Column-major 解释矩阵，调用中通过 `Cᵀ=BᵀAᵀ` 交换 `B/A` 参数顺序和 `N/M` 维度，**不执行额外的物理转置**。
 
-## 4. 工程目录
+## 2. 实机测试环境
 
-```text
-minigpu/
-├── CMakeLists.txt                 # C++ / CUDA 构建目标
-├── README.md
-├── .gitignore
-├── hello.cu                       # CUDA Hello / 线程索引入门
-├── vector_add.cu                  # Vector Add / H2D、D2H、cudaMalloc
-├── gemm_naive.cu                  # CPU/GPU Naive GEMM
-├── mlp.cu                         # 原始小尺寸双层 MLP + Benchmark
-├── mlp_shape_test.cu              # vector 动态 Tensor + Shape 验证
-└── docs/
-    ├── v1_results.md             # 已实测数据及其解释边界
-    └── V1_详细学习总结.md          # 从原理到面试的学习/AI 交接材料
+| 项目 | 配置 |
+|---|---|
+| GPU | NVIDIA GeForce RTX 2060，6144 MiB 显存，Turing / SM75 |
+| 宿主与 Linux | Windows + WSL2，Ubuntu 24.04.5 LTS |
+| NVIDIA Windows 驱动 | 591.74 |
+| CUDA Toolkit / NVCC | 12.8.93 |
+| 构建工具 | CMake + NVIDIA CUDA Compiler，C++17 / CUDA17 |
+
+**版本区别：**`nvidia-smi` 显示的 `CUDA Version: 13.1` 是驱动支持的 CUDA 版本，不是本工程实际使用的 CUDA Toolkit；`nvcc --version` 显示 **12.8.93**。
+
+WSL 中如果终端找不到 `nvidia-smi`，可运行：
+
+```bash
+/usr/lib/wsl/lib/nvidia-smi
 ```
 
-构建目录如 `build-v1/` 不应提交 Git。**本项目暂不使用 `CMakePresets.json`**。
+无需因此额外安装 Linux NVIDIA 显卡驱动。
 
-## 5. CMake 编译和运行
+## 3. 编译与运行
 
-首次配置（选择 Ninja、明确 CUDA 编译器和 `sm_75`；如果现有 `CMakeLists.txt` 已设置这些变量，重复指定不会增加必要性）：
+项目使用 CUDA 12.8 路径；RTX 2060 对应的目标架构是 `sm_75`。
 
 ```bash
 cd ~/projects/minigpu
-cmake -S . -B build-v1 -G Ninja \
-  -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
-  -DCMAKE_CUDA_ARCHITECTURES=75
-cmake --build build-v1 --parallel 4
+
+# 配置独立的 V2 构建目录
+cmake -S . -B build-v2 \
+  -DCUDAToolkit_ROOT=/usr/local/cuda-12.8
+
+# 只编译 V2 的统一正确性和 CUDA Graph 测试目标
+cmake --build build-v2 --target gemm_bench_unified --parallel 4
+
+# 大矩阵与非整除尺寸
+./build-v2/gemm_bench_unified 512 512 512
+./build-v2/gemm_bench_unified 130 65 70
 ```
 
-运行 V1 的两个核心目标：
+命令行三个参数依次是 **`M K N`**，即 `A[M,K] × B[K,N]`。不输入时，当前程序默认使用 `512 512 512`。
+
+批量运行五组已验证的 Shape：
 
 ```bash
-./build-v1/mlp
-./build-v1/mlp_shape_test
+for shape in '64 64 64' '128 128 128' '256 256 256' \
+             '512 512 512' '130 65 70'; do
+  read -r M K N <<< "$shape"
+  ./build-v2/gemm_bench_unified "$M" "$K" "$N" || exit 1
+done
 ```
 
-两个目标都已在实机的 CMake 构建产物上运行并输出 `Test: PASS`。修改 `.cu` 后使用 `cmake --build build-v1 --parallel 4` 重新构建。
-
-手工 NVCC 编译（排错时可用）：
+如果你修改源码，务必**先确认编译成功再运行**，避免误将上次成功构建的可执行文件当成新结果：
 
 ```bash
-/usr/local/cuda-12.8/bin/nvcc -arch=sm_75 mlp.cu -o test
-./test
+cmake --build build-v2 --target gemm_bench_unified --parallel 4 \
+  && ./build-v2/gemm_bench_unified 512 512 512
 ```
 
-**编译器路径要写 `cuda-12.8`（连字符），不是 `cuda_12.8`（下划线）。** 若错误路径已被 CMake 缓存，建议重新配置到全新的构建目录。
+早期学习阶段的独立测试程序（如 `gemm_bench.cu`、`gemm_tiled.cu`、`gemm_register_2*.cu`、`gemm_compare.cu`）仍保留，用于复现逐步优化过程；日常 V2 结果以 `gemm_bench_unified` 为统一测试入口。
 
-## 6. 正确性测试
+## 4. 正确性验证
 
-| Case | BATCH | IN | HIDDEN | OUT | 已检查输出 | 实机状态 |
-|---|---:|---:|---:|---:|---:|---|
-| 1：原始 MLP | 2 | 3 | 4 | 2 | 4 | PASS |
-| 2：非对齐尺寸 | 1 | 7 | 5 | 3 | 3 | PASS |
-| 3：中等尺寸 | 8 | 16 | 32 | 8 | 64 | PASS |
-| 4：较大尺寸 | 32 | 64 | 128 | 32 | 1024 | PASS |
+- **输入：** FP32，`std::mt19937(2026)` 固定种子，均匀分布在 `[-1,1]`。
+- **参考计算：** CPU 接收 FP32 输入，使用 FP64 完成乘法与累加，最后转换回 FP32 参考输出。
+- **逐元素判定：** `abs(gpu - ref) <= 2e-5 + 1e-4 * abs(ref)`，同时检查 NaN/Inf；测试前将 GPU 输出填为 NaN，以发现遗漏写回。
+- **已实测：** `64³`、`128³`、`256³`、`512³`、`130×65×70` 五种 Shape × 五种实现，**25/25 PASS**。
 
-- Case 1 使用固定手写矩阵，输出 `[[0, 2], [6, 0]]`。
-- Case 2–4 使用 `std::vector<float>` 和确定性公式初始化数据；所有输出元素均已检查，终端仅显示前几项。
-- FP32 检查采用 `abs(cpu-gpu) <= atol + rtol * abs(cpu)`（`atol=1e-5`、`rtol=1e-4`），并检查有限值。
-- **限制**：目前 `mlp_shape_test.cu` 通过修改源码中的四个维度常量、重新编译来切换 Case；尚无一个命令批量执行四个 Case 的自动化测试框架。
+验证容差是为**当前数据范围和 K≤512** 的实验选取的，不代表任意矩阵规模或任意输入分布都能达到同样的数值误差。曾对近零输出发生的单点容差边界问题进行 FP64 诊断；不能要求不同 FP32 GEMM 实现与 CPU 逐位完全相同。
 
-测试过程和计时说明详见 [V1 实验记录](docs/v1_results.md)。
+## 5. CUDA Graph 性能测试
 
-## 7. 性能指标如何理解
+所有实现共用设备输入 A/B、同一个 CUDA Stream 和 CPU Reference。统一计时设置为：
 
-- Warmup：20 次完整 MLP；Benchmark：1000 次完整 MLP。
-- 以 `cudaEventRecord(start)` / 三个 Kernel × 1000 / `cudaEventRecord(stop)` / `cudaEventSynchronize(stop)` / `cudaEventElapsedTime` 测量 GPU Event 区间。
-- 报告的平均值为 `total_ms / 1000`，包含被测 Stream 区间内可能存在的任务间隙。
-- **不包含**计时区间外的 GPU 显存分配、输入 H2D 传输和输出 D2H 传输；因此**不是端到端推理耗时**，也不保证等于三种 Kernel 各自纯计算耗时之和。
-- 原始单次测量 `0.431936 ms` 与预热后重复测试条件不同，**不能宣称 Kernel 得到了约十几倍性能加速**。
+1. 每种实现普通启动预热 **20 次**。
+2. 捕获 **64 次 GEMM** 为一个 CUDA Graph，实例化成可回放 GraphExec。
+3. 正式计时前预热 Graph **3 次**。
+4. 每轮 CUDA Event 测量 **16 次 Graph Replay**，相当于 **1024 次 GEMM**。
+5. 每个实现进行 **5 轮**测量，以每轮总时间除以 1024，再取**中位数**。
 
-## 8. 已知限制与后续工作
+`GFLOPS = 2 × M × N × K / (latency_ms × 10^6)`。
 
-1. Naive GEMM 没有 Shared Memory 数据复用、寄存器分块或 Tensor Core 优化；V2 才开始实现。
-2. 目前测试数据规模偏小且部分输入系数可被二进制精确表示；更多随机数据、边界 Shape、零维与溢出防护属于后续完善项。
-3. 当前 V1 中 C++/CUDA Buffer 生命周期使用手工 `cudaMalloc/cudaFree`；V5 再用 RAII 管理。
-4. 当前没有 PyTorch 自定义算子集成、实际 Transformer 模型加速或 cuBLAS 性能对比，不能在简历中宣称已经完成。
-5. V1 的主要价值在于**正确性、代码理解、系统数据流和可复现的初步 Benchmark**。
+**口径：**不计 GPU 显存分配、Host↔Device 传输、CPU Reference 和 Graph 捕获/实例化；计入 GPU 时间线上 Graph 回放的执行及可能存在的调度间隔。它是重复回放下的平均 GEMM 时间，**不是**端到端 API 调用延迟，也不代表完全去除一切调度影响后的纯指令耗时。
 
-## 9. 学习及交接材料
+## 6. V2 实测结果
 
-- [V1 实测记录：`docs/v1_results.md`](docs/v1_results.md)
-- [V1 详细学习总结：`docs/V1_详细学习总结.md`](docs/V1_详细学习总结.md)
+以下是**随机 FP32 + CPU FP64 累加参考值**条件下的 CUDA Graph 结果；单位 **μs**，越低越好：
 
-如要让其他 AI 接手，先发这两份文档，并让其检查当前仓库真实源码；不要把计划中的 V2–V6 当作已完成工作。
+| Shape | Naive | Tiled16 | Register2_16 | Register2_32 | cuBLAS |
+|---|---:|---:|---:|---:|---:|
+| 64³ | 5.092 | **4.986** | 6.041 | 13.155 | 6.955 |
+| 128³ | **9.306** | 9.599 | 10.229 | 12.672 | 5.084 |
+| 256³ | 60.234 | 42.888 | **39.179** | 50.580 | 15.838 |
+| 512³ | 502.394 | 320.928 | 274.126 | **265.238** | 70.168 |
+| 130×65×70 | 4.031 | **3.997** | 4.064 | 9.906 | 4.455 |
+
+**粗体表示该次测试中最快的自定义实现，不代表比 cuBLAS 更快。**
+
+对于 `512×512×512`：
+
+- Naive：**502.394 μs**，约 **534 GFLOPS**。
+- Register2_32：**265.238 μs**，约 **1.01 TFLOPS**；相对 Naive 获得 **1.89× 加速**。
+- cuBLAS：**70.168 μs**，约 **3.83 TFLOPS**；相对最快自定义实现快 **3.78×**。
+
+**小矩阵注意：**64³ 的三次独立进程复测，Tiled16 与 cuBLAS 的相对比值较稳定，但绝对延迟曾有接近两倍变化；130×65×70 的 Naive、Tiled16 与 Register2_16 很接近，三轮中最快实现有所变化。因此不把小矩阵的单次领先结果推广成通用性能结论。
+
+完整数值、复测原始记录、优化分析及限制见 [V2 性能报告](docs/PERFORMANCE.md)。
+
+## 7. 代码与文档索引
+
+```text
+minigpu/
+├── CMakeLists.txt
+├── README.md
+├── .gitignore
+├── mlp.cu                      # V1：双层 MLP Forward
+├── mlp_shape_test.cu           # V1：多 Shape 正确性
+├── gemm_bench.cu               # V2.1：Naive GEMM 基线
+├── gemm_tiled.cu               # V2.2：Shared Memory Tiling
+├── gemm_register_2.cu          # V2.4：Register2 TILE16
+├── gemm_register_2_tile8.cu    # V2.4：Register2 TILE8
+├── gemm_register_2_tile32.cu   # V2.4：Register2 TILE32
+├── gemm_compare.cu             # V2.6：独立 cuBLAS 正确性/计时
+├── gemm_bench_unified.cu       # V2.6–2.7：五种实现统一 Graph Benchmark
+└── docs/
+    ├── v1_results.md
+    ├── v2_naive_gemm_baseline.md
+    ├── PERFORMANCE.md
+    └── ...
+```
+
+上述为 V1/V2 的**主要文件**示意，完整文件清单以仓库当前内容为准。阶段性实验代码（如 `gemm_bench_graph.cu`、`gemm_tiled_1.cu`）可按需要保留，不作为主入口。
+
+## 8. 结论与后续方向
+
+MiniGPU V2 展示了从 Naive GEMM 到 Shared Memory Tiling、每线程两个输出的 Register Blocking，再到 cuBLAS 对照及 CUDA Graph 统一 Benchmark 的逐步优化过程，并记录了多尺寸、随机 FP32 的实机验证结果。
+
+下一阶段计划（**尚未实现**）：
+
+- **V3：** 使用 Nsight Systems / Nsight Compute 分析访存、占用率、指令与执行瓶颈，再决定进一步优化方向。
+- **V4：** Reduction、Softmax、RMSNorm、基础 Attention 与 Kernel Fusion。
+- **V5：** Buffer RAII、Stream/Event、显存复用等简化 GPU Runtime。
+- **V6：** 小型 Transformer 的实际 Profiling、自定义 CUDA Kernel 集成与端到端验证。
+
+**工程边界：**目前尚未完成上述 V3–V6 模块，也没有证据证明自定义 Kernel 在所有 Shape 上优于 cuBLAS，更不能声称当前是通用高性能 GEMM 库。

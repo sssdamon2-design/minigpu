@@ -48,3 +48,6 @@
 # Crash dumps
 core
 core.*
+
+# Local project archives
+/minigpu_v2_review.tar.gz
