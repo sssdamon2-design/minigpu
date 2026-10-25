@@ -19,8 +19,26 @@ target_link_libraries(gemm_bench_graph
     CUDA::cudart
 )
 
+# V4.1：Row-wise Softmax
+add_executable(softmax_v4 softmax_v4.cu)
 
+# V4.2：RMSNorm
+add_executable(rmsnorm_v4 rmsnorm_v4.cu)
 
+# V4.3：Attention Forward
+add_executable(
+    attention_v4
+    attention_v4.cu
+    softmax_v4.cu
+)
+
+target_compile_definitions(
+    attention_v4 PRIVATE MINIGPU_SOFTMAX_NO_MAIN
+)
+
+target_link_libraries(
+    attention_v4 PRIVATE CUDA::cublas CUDA::cudart
+)
 target_link_libraries(
     gemm_bench_unified
     PRIVATE
