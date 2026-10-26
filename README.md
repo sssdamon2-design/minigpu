@@ -2,7 +2,7 @@
 
 MiniGPU 是一个循序渐进的 **C++ / CUDA / AI Systems** 学习型工程：从基础 GPU Kernel 与双层 MLP 前向计算出发，逐步实现 FP32 GEMM（矩阵乘法）的 Shared Memory Tiling、Register Blocking，并使用 **NVIDIA cuBLAS** 作为优化对照，通过 **CUDA Event / CUDA Graph** 记录性能。
 
-> **当前状态（V2，2026-10-25）：** V1 的基本 CUDA / MLP 闭环和 V2 的五种 GEMM 统一正确性及 Benchmark 已在 RTX 2060 + WSL2 实机运行。V3–V6 属于后续计划，**未在本版本实现**。
+> **当前状态（V2，2026-10-25）：** V6 已完成 Qwen2.5-0.5B 真实模型性能基线、Profiler 热点定位、FP16 对照，以及自定义 GEMM 的 PyTorch Extension 集成。自定义 GEMM 数值正确性通过，但模型级性能低于原始 PyTorch 实现。
 >
 > 本项目面向学习与性能工程实践，**不是**工业级 GEMM 库、完整 AI 推理引擎或 PyTorch 替代品。
 

@@ -51,3 +51,23 @@ core.*
 
 # Local project archives
 /minigpu_v2_review.tar.gz
+
+# V6: local Python environment
+.venv-v6/
+
+# V6: generated logs and build artifacts
+v6/*.log
+v6/__pycache__/
+v6/*.so
+v6/*.o
+v6/*.safetensors
+
+# V6: local Python environment
+.venv-v6/
+
+# V6: generated logs and build artifacts
+v6/*.log
+v6/__pycache__/
+v6/*.so
+v6/*.o
+v6/*.safetensors
