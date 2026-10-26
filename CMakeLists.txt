@@ -82,3 +82,39 @@ set_target_properties(
     PROPERTIES
     CUDA_ARCHITECTURES 75
 )
+
+
+# V5.1：GPU Buffer RAII + 已有 Softmax
+add_executable(
+    runtime_v5
+    runtime_v5.cu
+    softmax_v4.cu
+)
+
+target_compile_definitions(
+    runtime_v5 PRIVATE MINIGPU_SOFTMAX_NO_MAIN
+)
+
+target_link_libraries(
+    runtime_v5 PRIVATE CUDA::cudart
+)
+
+# V5.2: Buffer Reuse + Stream/Event + Attention
+add_executable(
+    runtime_attention_v5
+    runtime_attention_v5.cu
+    attention_v4.cu
+    softmax_v4.cu
+)
+
+target_compile_definitions(
+    runtime_attention_v5 PRIVATE
+    MINIGPU_ATTENTION_NO_MAIN
+    MINIGPU_SOFTMAX_NO_MAIN
+)
+
+target_link_libraries(
+    runtime_attention_v5 PRIVATE
+    CUDA::cublas
+    CUDA::cudart
+)

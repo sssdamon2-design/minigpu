@@ -57,7 +57,8 @@ void attention_forward(
     float* d_out,
     int S,
     int D,
-    bool fused)
+bool fused,
+cudaStream_t stream = nullptr)
 {
     const float one = 1.0f;
     const float zero = 0.0f;
@@ -80,20 +81,20 @@ void attention_forward(
 
     if (fused) {
         // V4.4: 融合路径
-        scaled_softmax_kernel<<<S, THREADS>>>(
+        scaled_softmax_kernel<<<S, THREADS, 0, stream>>>(
             d_scores, d_weights, S, scale
         );
         check_cuda(cudaGetLastError(), "fused softmax launch");
     } else {
         // V4.3: 原始 Baseline
-        scale_kernel<<<(S * S + THREADS - 1) / THREADS, THREADS>>>(
-            d_scores, S * S, scale
-        );
+        scale_kernel<<<
+    (S * S + THREADS - 1) / THREADS,
+    THREADS, 0, stream>>>(d_scores, S * S, scale);
         check_cuda(cudaGetLastError(), "scale launch");
 
-        softmax_kernel<<<S, THREADS>>>(
-            d_scores, d_weights, S
-        );
+        softmax_kernel<<<S, THREADS, 0, stream>>>(
+    d_scores, d_weights, S
+);
         check_cuda(cudaGetLastError(), "softmax launch");
     }
 
@@ -370,7 +371,7 @@ bool run_test(int S, int D) {
 
     return pass;
 }
-
+#ifndef MINIGPU_ATTENTION_NO_MAIN
 int main() {
     bool pass = true;
 
@@ -387,3 +388,5 @@ int main() {
 
     return pass ? EXIT_SUCCESS : EXIT_FAILURE;
 }
+
+#endif
